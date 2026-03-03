@@ -1,58 +1,89 @@
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from curl_cffi import requests
-import asyncio
 
 app = FastAPI()
 
 @app.middleware("http")
-async def add_cors_headers(request: Request, call_next):
+async def cors_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
-        return Response(status_code=204)
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
 
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET,OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
+    origin = request.headers.get("origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = request.headers.get(
+            "access-control-request-headers", "*"
+        )
+
     return response
 
 
-@app.get("/")
-async def proxy(url: str = None):
+@app.api_route("/", methods=["GET", "POST"])
+async def proxy(request: Request, url: str = None):
     if not url:
         return PlainTextResponse("Missing url", status_code=400)
 
     try:
-        print("Proxy start:", url)
+        # --- クライアントからヘッダー取得 ---
+        incoming_cookies = request.headers.get("cookie")
 
-        r = requests.get(
-            url,
+        headers = {
+            "User-Agent": request.headers.get("user-agent"),
+            "Accept": request.headers.get("accept"),
+            "Accept-Language": request.headers.get("accept-language"),
+        }
+
+        if incoming_cookies:
+            headers["Cookie"] = incoming_cookies
+
+        # --- upstreamへリクエスト ---
+        r = requests.request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            data=await request.body(),
             impersonate="chrome136",
-            timeout=10,
+            allow_redirects=False,
+            timeout=20,
         )
 
-        if not r:
-            raise Exception("Empty response")
-
+        # --- Content-Type を必ず取得 ---
         content_type = r.headers.get("content-type", "application/octet-stream")
 
-        if "count.getloli.com" in url or ".svg" in url:
-            content_type = "image/svg+xml"
-        elif ".css" in url:
-            content_type = "text/css"
-
-        return Response(
+        # --- レスポンス作成 ---
+        response = Response(
             content=r.content,
             status_code=r.status_code,
-            headers={
-                "Content-Type": content_type,
-                "Content-Disposition": "inline"
-            }
+            media_type=content_type
         )
 
-    except Exception as e:
-        print("Proxy error:", str(e))
-        return PlainTextResponse("Proxy error: " + str(e), status_code=500)
+        # --- 危険ヘッダー除外して転送 ---
+        excluded_headers = {
+            "content-encoding",
+            "content-length",
+            "transfer-encoding",
+            "connection"
+        }
 
-    finally:
-        print("Proxy finished")
+        for key, value in r.headers.items():
+            if key.lower() in excluded_headers:
+                continue
+            response.headers[key] = value
+
+        # --- Set-Cookie 転送 ---
+        try:
+            cookies = r.headers.get_list("set-cookie")
+            for c in cookies:
+                response.headers.append("Set-Cookie", c)
+        except Exception:
+            pass
+
+        return response
+
+    except Exception as e:
+        return PlainTextResponse("Proxy error: " + str(e), status_code=500)
