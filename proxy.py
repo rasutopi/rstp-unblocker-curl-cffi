@@ -74,6 +74,7 @@ async def proxy(request: Request, url: str = None):
             if key.lower() in excluded_headers:
                 continue
             response.headers[key] = value
+            print(request.headers)
 
         # --- Set-Cookie 転送 ---
         try:
