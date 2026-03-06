@@ -32,16 +32,26 @@ async def proxy(request: Request, url: str = None):
 
         # ===== Header構築 =====
         headers = {
-            "User-Agent": request.headers.get("user-agent"),
-            "Accept": request.headers.get("accept"),
-            "Accept-Language": request.headers.get("accept-language"),
-            "Referer": request.headers.get("referer"),
-            "Origin": request.headers.get("origin"),
+            "User-Agent": request.headers.get("user-agent")
+            or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36",
 
-            # ★超重要（圧縮壊れ防止）
-            "Accept-Encoding": "identity"
+            "Accept": request.headers.get("accept", "*/*"),
+
+            "Accept-Language": request.headers.get("accept-language", "en-US,en;q=0.9"),
+
+            "Referer": request.headers.get("referer", ""),
+
+            "Origin": request.headers.get("origin", ""),
+
+            # 圧縮防止
+            "Accept-Encoding": "identity",
+
+            # WAF対策
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document"
         }
-
+        
         # Range系
         if range_header := request.headers.get("range"):
             headers["Range"] = range_header
