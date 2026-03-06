@@ -17,9 +17,7 @@ async def cors_middleware(request: Request, call_next):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = request.headers.get(
-            "access-control-request-headers", "*"
-        )
+        response.headers["Access-Control-Allow-Headers"] = "*"
 
     return response
 
@@ -30,35 +28,36 @@ async def proxy(request: Request, url: str = None):
         return PlainTextResponse("Missing url", status_code=400)
 
     try:
-        # ---- クライアントヘッダ取得 ----
         incoming_cookies = request.headers.get("cookie")
 
+        # ===== Header構築 =====
         headers = {
             "User-Agent": request.headers.get("user-agent"),
             "Accept": request.headers.get("accept"),
             "Accept-Language": request.headers.get("accept-language"),
             "Referer": request.headers.get("referer"),
             "Origin": request.headers.get("origin"),
+
+            # ★超重要（圧縮壊れ防止）
+            "Accept-Encoding": "identity"
         }
 
         # Range系
-        range_header = request.headers.get("range")
-        if range_header:
+        if range_header := request.headers.get("range"):
             headers["Range"] = range_header
 
-        if_range = request.headers.get("if-range")
-        if if_range:
+        if if_range := request.headers.get("if-range"):
             headers["If-Range"] = if_range
 
         if incoming_cookies:
             headers["Cookie"] = incoming_cookies
 
-        # ---- body処理 ----
+        # ===== body処理 =====
         body = None
         if request.method in ("POST", "PUT", "PATCH"):
             body = await request.body()
 
-        # ---- upstream request ----
+        # ===== upstream request =====
         r = requests.request(
             method=request.method,
             url=url,
@@ -67,21 +66,35 @@ async def proxy(request: Request, url: str = None):
             impersonate="chrome136",
             allow_redirects=False,
             timeout=(10, 300),
-            stream=True
+            stream=True,
+            verify=False
         )
 
-        content_type = r.headers.get("content-type", "application/octet-stream")
+        content_type = r.headers.get(
+            "content-type",
+            "application/octet-stream"
+        )
+
+        # ===== Stream Generator（超重要）=====
+        def stream_response():
+            try:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        yield chunk
+            finally:
+                r.close()
 
         response = StreamingResponse(
-            r.iter_content(chunk_size=65536),
+            stream_response(),
             status_code=r.status_code,
             media_type=content_type
         )
 
-        # ---- ヘッダ転送 ----
+        # ===== Header転送（安全版）=====
         excluded_headers = {
             "transfer-encoding",
             "connection",
+            "content-encoding"
         }
 
         for key, value in r.headers.items():
@@ -89,10 +102,9 @@ async def proxy(request: Request, url: str = None):
                 continue
             response.headers[key] = value
 
-        # ---- Set-Cookie ----
+        # ===== Set-Cookie =====
         try:
-            cookies = r.headers.get_list("set-cookie")
-            for c in cookies:
+            for c in r.headers.get_list("set-cookie"):
                 response.headers.append("Set-Cookie", c)
         except Exception:
             pass
@@ -100,4 +112,7 @@ async def proxy(request: Request, url: str = None):
         return response
 
     except Exception as e:
-        return PlainTextResponse("Proxy error: " + str(e), status_code=500)
+        return PlainTextResponse(
+            f"Proxy error: {str(e)}",
+            status_code=500
+        )
